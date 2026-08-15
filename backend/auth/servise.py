@@ -68,3 +68,21 @@ class AuthService:
             "refresh_token": AuthService.create_refresh_token({"username": user.username}),
         }
         return {"message": "User registered successfully", "tokens": tokens}
+
+
+    @staticmethod
+    async def login(data: LoginSchema, db: AsyncSession):
+        result = await db.execute(select(User).where(User.username == data.username))
+        user = result.scalar_one_or_none()
+
+        if user is None or not AuthService.verify_password(data.password, user.password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid username or password",
+            )
+
+        tokens = {
+            "access_token": AuthService.create_access_token({"username": user.username}),
+            "refresh_token": AuthService.create_refresh_token({"username": user.username}),
+        }
+        return {"message": "Login successful", "tokens": tokens}
