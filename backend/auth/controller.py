@@ -12,3 +12,7 @@ bearer_scheme = HTTPBearer()
 @router.post("/signup")
 async def signup(data: SignupSchema, db: AsyncSession = Depends(get_db)):
     return await AuthService.sign_up(data, db)
+
+@router.post("/login")
+async def login(data: LoginSchema, db: AsyncSession = Depends(get_db)):
+    return await AuthService.login(data, db)
