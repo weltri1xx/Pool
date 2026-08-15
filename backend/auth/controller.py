@@ -9,3 +9,6 @@ from backend.database import get_db
 router = APIRouter(prefix="/auth", tags=["auth"])
 bearer_scheme = HTTPBearer()
 
+@router.post("/signup")
+async def signup(data: SignupSchema, db: AsyncSession = Depends(get_db)):
+    return await AuthService.sign_up(data, db)
