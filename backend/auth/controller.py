@@ -24,3 +24,7 @@ async def me(
 ):
     user = await AuthService.get_current_user(credentials.credentials, db)
     return {"id": user.id, "username": user.username}
+
+@router.post("/refresh")
+async def refresh(data: RefreshSchema, db: AsyncSession = Depends(get_db)):
+    return await AuthService.refresh_access_token(data.refresh_token, db)
