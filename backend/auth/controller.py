@@ -16,3 +16,11 @@ async def signup(data: SignupSchema, db: AsyncSession = Depends(get_db)):
 @router.post("/login")
 async def login(data: LoginSchema, db: AsyncSession = Depends(get_db)):
     return await AuthService.login(data, db)
+
+@router.get("/me")
+async def me(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+):
+    user = await AuthService.get_current_user(credentials.credentials, db)
+    return {"id": user.id, "username": user.username}
