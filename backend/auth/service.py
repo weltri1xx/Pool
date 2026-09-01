@@ -1,78 +1,84 @@
 from datetime import datetime, timedelta, timezone
 from os import getenv
-from typing import TypedDict
+from typing import Optional, TypedDict
+import os
+import shutil
+
 import bcrypt
-import jwt  
 from dotenv import load_dotenv
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends, HTTPException, UploadFile, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+import jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from backend.auth.models import User
 from backend.auth.schemes.post import LoginSchema, SignupSchema
 from backend.database import get_db
 
 load_dotenv()
 
-SECRET_KEY = getenv("ACCESS_SECRET_KEY", "fallback_access_secret")
-REFRESH_SECRET_KEY = getenv("REFRESH_SECRET_KEY", "fallback_refresh_secret")
-ALGORITHM = getenv("ALGORITHM", "HS256")
+SECRET_KEY = getenv("ACCESS_SECRET_KEY")
+REFRESH_SECRET_KEY = getenv("REFRESH_SECRET_KEY")
+ALGORITHM = "HS256"
 
-# Swagger UI uchun faqat bitta HTTP Bearer sxemasini belgilaymiz
-security = HTTPBearer(auto_error=False)
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+PROFILE_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png"]
+MAX_PROFILE_IMAGE_SIZE = 10 * 1024 * 1024
+
+bearer_scheme = HTTPBearer()
+optional_bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class TokenData(TypedDict):
-    username: str
+    email: str
 
 
 class AuthService:
+    @staticmethod
+    async def sign_up(data: SignupSchema, db: AsyncSession):
+        result = await db.execute(select(User).where(User.email == data.email))
+        if result.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already exists",
+            )
 
-    @classmethod
-    async def get_current_user(
-        cls, 
-        auth: HTTPAuthorizationCredentials | None = Depends(security), 
-        db: AsyncSession = Depends(get_db)
-    ) -> User:
-        credentials_exception = HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
+        user = User(
+            username=data.username,
+            first_name=data.first_name,
+            last_name=data.last_name,
+            email=data.email, 
+            password=AuthService.get_password_hash(data.password),
         )
-        if not auth or not auth.credentials:
-            raise credentials_exception
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
 
-        token = auth.credentials
-        try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            username: str = payload.get("username")
-            if username is None:
-                raise credentials_exception
-        except jwt.PyJWTError: 
-            raise credentials_exception
+        tokens = {
+            "access_token": AuthService.create_access_token({"email": user.email}),
+            "refresh_token": AuthService.create_refresh_token({"email": user.email}),
+        }
+        return {"message": "User registered successfully", "tokens": tokens}
 
-        result = await db.execute(select(User).where(User.username == username))
+    @staticmethod
+    async def login(data: LoginSchema, db: AsyncSession):
+        result = await db.execute(select(User).where(User.email == data.email))
         user = result.scalar_one_or_none()
 
-        if user is None:
-            raise credentials_exception
+        if user is None or not AuthService.verify_password(data.password, user.password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password",  
+            )
 
-        return user
-
-    @classmethod
-    async def get_current_user_optional(
-        cls, 
-        auth: HTTPAuthorizationCredentials | None = Depends(security), 
-        db: AsyncSession = Depends(get_db)
-    ) -> User | None:
-        if not auth or not auth.credentials:
-            return None
-        try:
-            return await cls.get_current_user(auth=auth, db=db)
-        except HTTPException:
-            return None
-
+        tokens = {
+            "access_token": AuthService.create_access_token({"email": user.email}),
+            "refresh_token": AuthService.create_refresh_token({"email": user.email}),
+        }
+        return {"message": "Login successful", "tokens": tokens}    
+    
     @staticmethod
     def get_password_hash(password: str) -> str:
         return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -94,72 +100,100 @@ class AuthService:
         expire = datetime.now(timezone.utc) + timedelta(days=7)
         to_encode.update({"exp": expire})
         return jwt.encode(to_encode, REFRESH_SECRET_KEY, algorithm=ALGORITHM)
-
+    
     @staticmethod
-    async def sign_up(data: SignupSchema, db: AsyncSession):
-        result = await db.execute(select(User).where(User.username == data.username))
-        if result.scalar_one_or_none() is not None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Username already exists",
-            )
-
-        user = User(
-            username=data.username,
-            password=AuthService.get_password_hash(data.password),
-        )
-
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-
-        tokens = {
-            "access_token": AuthService.create_access_token({"username": user.username}),
-            "refresh_token": AuthService.create_refresh_token({"username": user.username}),
-        }
-        return {"message": "User registered successfully", "tokens": tokens}
-
-    @classmethod
-    async def refresh_access_token(cls, refresh_token: str, db: AsyncSession):
+    async def refresh_access_token(refresh_token: str, db: AsyncSession) -> dict:
         credentials_exception = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Could not validate refresh token",
         )
         try:
             payload = jwt.decode(refresh_token, REFRESH_SECRET_KEY, algorithms=[ALGORITHM])
-            username: str = payload.get("username")
-            if username is None:
+            email = payload.get("email")
+            if email is None:
+                raise credentials_exception
+        except jwt.PyJWTError:  
+            raise credentials_exception
+
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise credentials_exception
+
+        new_access_token = AuthService.create_access_token({"email": user.email})
+        return {"access_token": new_access_token}
+
+
+    @staticmethod
+    async def update_profile_picture(db: AsyncSession, user: User, image: UploadFile) -> User:
+        if not image.filename:
+            raise HTTPException(status_code=400, detail="Rasm tanlanmadi")
+
+        file_ext = image.filename[image.filename.rfind("."):].lower()
+        if file_ext not in PROFILE_IMAGE_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail="Faqat rasm formatidagi fayllar yuklanishi mumkin!",
+            )
+
+        content = await image.read()
+        if len(content) > MAX_PROFILE_IMAGE_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail="Rasm hajmi 10 MB dan oshmasligi kerak!",
+            )
+        await image.seek(0)
+
+        image_path = os.path.join(
+            UPLOAD_DIR, f"avatar_{user.id}_{datetime.now().timestamp()}{file_ext}"
+        )
+        with open(image_path, "wb") as buffer:
+            shutil.copyfileobj(image.file, buffer)
+
+        user.profile_picture = f"/{image_path}".replace("\\", "/")
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+        return user
+
+    @staticmethod
+    async def get_current_user(
+        credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+        db: AsyncSession = Depends(get_db),
+    ) -> User:
+        credentials_exception = HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+        )
+        try:
+            payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+            email = payload.get("email")
+            if email is None:
                 raise credentials_exception
         except jwt.PyJWTError:
             raise credentials_exception
 
-        result = await db.execute(select(User).where(User.username == username))
+        result = await db.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
-
         if user is None:
             raise credentials_exception
 
-        new_access_token = cls.create_access_token({"username": user.username})
-
-        return {
-            "access_token": new_access_token,
-            "token_type": "bearer"
-        }
+        return user
 
     @staticmethod
-    async def login(data: LoginSchema, db: AsyncSession):
-        result = await db.execute(select(User).where(User.username == data.username))
-        user = result.scalar_one_or_none()
+    async def get_current_user_optional(
+        credentials: HTTPAuthorizationCredentials | None = Depends(optional_bearer_scheme),
+        db: AsyncSession = Depends(get_db),
+    ) -> User | None:
+        if credentials is None:
+            return None
+        try:
+            payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+            email = payload.get("email")
+            if email is None:
+                return None
+        except jwt.PyJWTError:
+            return None
 
-        if user is None or not AuthService.verify_password(data.password, user.password):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid username or password",
-            )
-
-        tokens = {
-            "access_token": AuthService.create_access_token({"username": user.username}),
-            "refresh_token": AuthService.create_refresh_token({"username": user.username}),
-        }
-        return {"message": "Login successful", "tokens": tokens}
+        result = await db.execute(select(User).where(User.email == email))
+        return result.scalar_one_or_none()
