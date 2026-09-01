@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
  
 from backend.auth.models import User
 from backend.chat.models import Conversation, Message
-# from backend.websocket.service import manager
+from backend.vdchat.service import manager
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
