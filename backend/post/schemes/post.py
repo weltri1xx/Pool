@@ -1,18 +1,27 @@
-from pydantic import BaseModel
 from datetime import datetime
-from backend.post.models import MediaType
+from pydantic import BaseModel
 
-class PostResponse(BaseModel):
+class PostResponseSchema(BaseModel):
+    id: int
+    text: str | None
+    image_url: str | None
+    video_url: str | None
+    created_at: datetime
+    user_id: int
+    likes_count: int = 0
+    liked_by_me: bool = False
+
+    model_config = {
+        "from_attributes": True
+    }
+
+
+class LikeResponseSchema(BaseModel):
     id: int
     user_id: int
-    content: str | None
-    media_url: str | None
-    media_type: MediaType
+    post_id: int
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
-class CursorPaginationResponse(BaseModel):
-    items: list[PostResponse]
-    next_cursor: str | None
+    model_config = {
+        "from_attributes": True
+    }

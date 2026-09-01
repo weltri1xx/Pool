@@ -4,18 +4,23 @@ from typing import TypedDict
 import bcrypt
 import jwt  
 from dotenv import load_dotenv
-from fastapi import HTTPException, status
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.auth.models import User
 from backend.auth.schemes.post import LoginSchema, SignupSchema
+from backend.database import get_db
 
 load_dotenv()
 
 SECRET_KEY = getenv("ACCESS_SECRET_KEY", "fallback_access_secret")
 REFRESH_SECRET_KEY = getenv("REFRESH_SECRET_KEY", "fallback_refresh_secret")
 ALGORITHM = getenv("ALGORITHM", "HS256")
+
+# Swagger UI uchun faqat bitta HTTP Bearer sxemasini belgilaymiz
+security = HTTPBearer(auto_error=False)
 
 
 class TokenData(TypedDict):
@@ -25,12 +30,20 @@ class TokenData(TypedDict):
 class AuthService:
 
     @classmethod
-    async def get_current_user(cls, token: str, db: AsyncSession) -> User:
+    async def get_current_user(
+        cls, 
+        auth: HTTPAuthorizationCredentials | None = Depends(security), 
+        db: AsyncSession = Depends(get_db)
+    ) -> User:
         credentials_exception = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
+        if not auth or not auth.credentials:
+            raise credentials_exception
+
+        token = auth.credentials
         try:
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
             username: str = payload.get("username")
@@ -46,6 +59,19 @@ class AuthService:
             raise credentials_exception
 
         return user
+
+    @classmethod
+    async def get_current_user_optional(
+        cls, 
+        auth: HTTPAuthorizationCredentials | None = Depends(security), 
+        db: AsyncSession = Depends(get_db)
+    ) -> User | None:
+        if not auth or not auth.credentials:
+            return None
+        try:
+            return await cls.get_current_user(auth=auth, db=db)
+        except HTTPException:
+            return None
 
     @staticmethod
     def get_password_hash(password: str) -> str:
